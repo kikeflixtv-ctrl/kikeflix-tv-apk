@@ -1,0 +1,29 @@
+{
+  "appId": "com.kikeflix.tv",
+  "appName": "KikeFlix.TV",
+  "webDir": "www",
+  "server": {
+    "url": "https://publicopruebas.blogspot.com/p/kikeflixapp-tv.html",
+    "cleartext": true,
+    "allowNavigation": [
+      "publicopruebas.blogspot.com",
+      "*.blogspot.com",
+      "*.blogger.com",
+      "*.googleusercontent.com",
+      "*.youtube.com",
+      "*.youtu.be",
+      "*.google.com",
+      "*.firebaseapp.com",
+      "*.cloudinary.com",
+      "*.github.io",
+      "*.githubusercontent.com",
+      "*"
+    ]
+  },
+  "android": {
+    "allowMixedContent": true,
+    "captureInput": false,
+    "webContentsDebuggingEnabled": true,
+    "backgroundColor": "#05070e"
+  }
+}
