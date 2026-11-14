@@ -1,0 +1,188 @@
+const fs = require('fs');
+const path = require('path');
+
+const manifestPath = path.join('android', 'app', 'src', 'main', 'AndroidManifest.xml');
+let manifest = fs.readFileSync(manifestPath, 'utf8');
+
+const extras = [
+  '    <uses-feature android:name="android.software.leanback" android:required="false" />',
+  '    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />',
+  '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
+  '    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />',
+  '    <uses-permission android:name="android.permission.WAKE_LOCK" />'
+].filter(line => !manifest.includes(line.match(/android:name="([^"]+)"/)[1]));
+
+if (extras.length) {
+  manifest = manifest.replace('<application', extras.join('\n') + '\n\n    <application');
+}
+if (!manifest.includes('android:usesCleartextTraffic')) {
+  manifest = manifest.replace('<application', '<application\n        android:usesCleartextTraffic="true"');
+}
+if (!manifest.includes('android:banner')) {
+  manifest = manifest.replace('<application', '<application\n        android:banner="@mipmap/ic_launcher"');
+}
+if (!manifest.includes('LEANBACK_LAUNCHER')) {
+  manifest = manifest.replace(
+    '<category android:name="android.intent.category.LAUNCHER" />',
+    '<category android:name="android.intent.category.LAUNCHER" />\n                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />'
+  );
+}
+
+fs.writeFileSync(manifestPath, manifest, 'utf8');
+console.log('AndroidManifest.xml actualizado para Android TV / TV Box.');
+
+const mainActivityPath = path.join('android', 'app', 'src', 'main', 'java', 'com', 'kikeflix', 'tv', 'MainActivity.java');
+fs.mkdirSync(path.dirname(mainActivityPath), { recursive: true });
+
+const mainActivityJava = `package com.kikeflix.tv;
+
+import android.content.Context;
+import android.net.wifi.WifiManager;
+import android.os.Bundle;
+import android.os.PowerManager;
+import android.webkit.CookieManager;
+import android.webkit.JavascriptInterface;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.widget.Toast;
+import androidx.activity.OnBackPressedCallback;
+import com.getcapacitor.BridgeActivity;
+
+public class MainActivity extends BridgeActivity {
+    private PowerManager.WakeLock wakeLock;
+    private WifiManager.WifiLock wifiLock;
+    private long lastBackPressMs = 0L;
+
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        WebView webView = getBridge() != null ? getBridge().getWebView() : null;
+        if (webView != null) {
+            WebSettings settings = webView.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setDomStorageEnabled(true);
+            settings.setDatabaseEnabled(true);
+            settings.setMediaPlaybackRequiresUserGesture(false);
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+            settings.setUseWideViewPort(true);
+            settings.setLoadWithOverviewMode(true);
+
+            CookieManager cm = CookieManager.getInstance();
+            cm.setAcceptCookie(true);
+            cm.setAcceptThirdPartyCookies(webView, true);
+
+            webView.addJavascriptInterface(new AndroidAudioBridge(), "AndroidAudio");
+        }
+
+        getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
+            @Override
+            public void handleOnBackPressed() {
+                WebView wv = getBridge() != null ? getBridge().getWebView() : null;
+                if (wv == null) {
+                    finish();
+                    return;
+                }
+                String checkJs =
+                    "(function(){" +
+                    "  if(document.body.classList.contains('tv-vip-fs-on') && typeof window.kfCanalesVipExitFullscreen === 'function'){" +
+                    "    window.kfCanalesVipExitFullscreen(); return '1';" +
+                    "  }" +
+                    "  var fs = document.body.classList.contains('tv-18-fs-on') ||" +
+                    "           document.body.classList.contains('tv-music-fs-on') ||" +
+                    "           !!document.querySelector('#seccion-3.tv-ch-fs-on');" +
+                    "  var p = document.getElementById('player-screen');" +
+                    "  var m = document.getElementById('modal');" +
+                    "  var km = document.getElementById('kf-modal-overlay');" +
+                    "  var scr = document.querySelector('.app-screen:not([hidden])');" +
+                    "  var menu = document.getElementById('menu-desplegable');" +
+                    "  var handled = !!(fs ||" +
+                    "    (p && !p.hidden) ||" +
+                    "    (m && m.classList.contains('open')) ||" +
+                    "    (km && km.classList.contains('activo')) ||" +
+                    "    (menu && getComputedStyle(menu).display !== 'none') ||" +
+                    "    (scr && scr.id !== 'screen-home'));" +
+                    "  if(handled){" +
+                    "    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',code:'Escape',keyCode:27,which:27,bubbles:true,cancelable:true}));" +
+                    "  }" +
+                    "  return handled ? '1' : '0';" +
+                    "})()";
+
+                wv.evaluateJavascript(checkJs, value -> {
+                    if ("\\"1\\"".equals(value)) {
+                        return;
+                    }
+                    long now = System.currentTimeMillis();
+                    if (now - lastBackPressMs < 2000L) {
+                        finish();
+                    } else {
+                        lastBackPressMs = now;
+                        Toast.makeText(MainActivity.this, "Pulsa Atras otra vez para salir", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            }
+        });
+    }
+
+    @SuppressWarnings("deprecation")
+    private void acquireLocks() {
+        try {
+            if (wakeLock == null) {
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KikeFlix:AudioWakeLock");
+                    wakeLock.setReferenceCounted(false);
+                }
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire();
+            }
+            if (wifiLock == null) {
+                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wm != null) {
+                    wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "KikeFlix:AudioWifiLock");
+                    wifiLock.setReferenceCounted(false);
+                }
+            }
+            if (wifiLock != null && !wifiLock.isHeld()) {
+                wifiLock.acquire();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void releaseLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        } catch (Exception ignored) {}
+        try {
+            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onDestroy() {
+        releaseLocks();
+        super.onDestroy();
+    }
+
+    public class AndroidAudioBridge {
+        @JavascriptInterface
+        public void iniciar(String titulo, String artista, String artwork) {
+            runOnUiThread(() -> acquireLocks());
+        }
+
+        @JavascriptInterface
+        public void pausar() {
+            runOnUiThread(() -> releaseLocks());
+        }
+
+        @JavascriptInterface
+        public void detener() {
+            runOnUiThread(() -> releaseLocks());
+        }
+    }
+}
+`;
+
+fs.writeFileSync(mainActivityPath, mainActivityJava, 'utf8');
+console.log('MainActivity.java actualizado OK.');
