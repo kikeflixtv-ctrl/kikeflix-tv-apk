@@ -1,0 +1,16 @@
+{
+  "name": "kikeflix-tv-apk",
+  "version": "1.0.0",
+  "description": "KikeFlix.TV para Android TV y TV Box",
+  "private": true,
+  "scripts": {
+    "cap:sync": "npx cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/core": "^6.2.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0"
+  }
+}
