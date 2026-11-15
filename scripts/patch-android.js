@@ -212,14 +212,8 @@ function downloadBuffer(url) {
 async function generateIconsAndBanner() {
   console.log('Descargando logo oficial de KikeFlix...');
   const logoBuf = await downloadBuffer(LOGO_URL);
-
-  try {
-    require.resolve('sharp');
-  } catch (e) {
-    console.log('Instalando sharp temporalmente para generar iconos y banner TV...');
-    execSync('npm install --no-save sharp', { stdio: 'inherit' });
-  }
-  const sharp = require('sharp');
+  const logoPath = '/tmp/kikeflix_logo.png';
+  fs.writeFileSync(logoPath, logoBuf);
 
   const resDir = path.join('android', 'app', 'src', 'main', 'res');
   const anydpiDir = path.join(resDir, 'mipmap-anydpi-v26');
@@ -228,55 +222,59 @@ async function generateIconsAndBanner() {
     console.log('Eliminado mipmap-anydpi-v26 por defecto.');
   }
 
-  const bg = { r: 5, g: 7, b: 14, alpha: 1 };
-  const mipmaps = [
-    { dir: 'mipmap-mdpi', size: 48 },
-    { dir: 'mipmap-hdpi', size: 72 },
-    { dir: 'mipmap-xhdpi', size: 96 },
-    { dir: 'mipmap-xxhdpi', size: 144 },
-    { dir: 'mipmap-xxxhdpi', size: 192 }
-  ];
+  const pyScript = `
+import os
+from PIL import Image
 
-  for (const m of mipmaps) {
-    const outDir = path.join(resDir, m.dir);
-    fs.mkdirSync(outDir, { recursive: true });
-    const inner = Math.round(m.size * 0.78);
-    const resizedLogo = await sharp(logoBuf)
-      .resize(inner, inner, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-      .png()
-      .toBuffer();
+RESAMPLE = getattr(Image, 'Resampling', Image).LANCZOS
+BG = (5, 7, 14, 255)
+logo = Image.open('${logoPath}').convert('RGBA')
+res_dir = '${resDir.replace(/\\/g, '/')}'
 
-    const iconBuf = await sharp({
-      create: { width: m.size, height: m.size, channels: 4, background: bg }
-    })
-      .composite([{ input: resizedLogo, gravity: 'center' }])
-      .png()
-      .toBuffer();
+def fit_center(canvas_w, canvas_h, max_w, max_h):
+    ratio = min(max_w / logo.width, max_h / logo.height)
+    nw = max(1, int(round(logo.width * ratio)))
+    nh = max(1, int(round(logo.height * ratio)))
+    resized = logo.resize((nw, nh), RESAMPLE)
+    canvas = Image.new('RGBA', (canvas_w, canvas_h), BG)
+    canvas.paste(resized, ((canvas_w - nw) // 2, (canvas_h - nh) // 2), resized)
+    return canvas, resized
 
-    fs.writeFileSync(path.join(outDir, 'ic_launcher.png'), iconBuf);
-    fs.writeFileSync(path.join(outDir, 'ic_launcher_round.png'), iconBuf);
-    fs.writeFileSync(path.join(outDir, 'ic_launcher_foreground.png'), resizedLogo);
-  }
-  console.log('Iconos mipmap generados con el logo de KikeFlix.');
+mipmaps = [
+    ('mipmap-mdpi', 48),
+    ('mipmap-hdpi', 72),
+    ('mipmap-xhdpi', 96),
+    ('mipmap-xxhdpi', 144),
+    ('mipmap-xxxhdpi', 192),
+]
 
-  const bannerLogo = await sharp(logoBuf)
-    .resize(220, 130, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
-    .png()
-    .toBuffer();
+for folder, size in mipmaps:
+    out_dir = os.path.join(res_dir, folder)
+    os.makedirs(out_dir, exist_ok=True)
+    inner = int(round(size * 0.78))
+    icon, fg = fit_center(size, size, inner, inner)
+    icon.save(os.path.join(out_dir, 'ic_launcher.png'))
+    icon.save(os.path.join(out_dir, 'ic_launcher_round.png'))
+    fg_canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+    fg_canvas.paste(fg, ((size - fg.width) // 2, (size - fg.height) // 2), fg)
+    fg_canvas.save(os.path.join(out_dir, 'ic_launcher_foreground.png'))
 
-  const bannerBuf = await sharp({
-    create: { width: 320, height: 180, channels: 4, background: bg }
-  })
-    .composite([{ input: bannerLogo, gravity: 'center' }])
-    .png()
-    .toBuffer();
+banner, _ = fit_center(320, 180, 220, 130)
+for d in ('drawable', 'drawable-xhdpi'):
+    d_dir = os.path.join(res_dir, d)
+    os.makedirs(d_dir, exist_ok=True)
+    banner.save(os.path.join(d_dir, 'tv_banner.png'))
 
-  for (const d of ['drawable', 'drawable-xhdpi']) {
-    const dDir = path.join(resDir, d);
-    fs.mkdirSync(dDir, { recursive: true });
-    fs.writeFileSync(path.join(dDir, 'tv_banner.png'), bannerBuf);
-  }
-  console.log('Banner TV (320x180) generado en drawable/tv_banner.png.');
+print('Iconos mipmap y banner TV generados OK.')
+`;
+
+  const pyFile = '/tmp/gen_icons.py';
+  fs.writeFileSync(pyFile, pyScript, 'utf8');
+
+  console.log('Preparando Pillow para generar iconos y banner TV...');
+  execSync('python3 -m venv /tmp/pyimg && /tmp/pyimg/bin/pip install --quiet pillow && /tmp/pyimg/bin/python ' + pyFile, {
+    stdio: 'inherit'
+  });
 }
 
 generateIconsAndBanner().catch((err) => {
