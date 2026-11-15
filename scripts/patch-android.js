@@ -1,5 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const { execSync } = require('child_process');
+
+const LOGO_URL = 'https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEil2dds7gIHlc-jR_PV41bR6HiwYzt4n7ciZhiP8KlTlWXXIyZrrYzCYP1UwpK-bLTm6eI4Rpvhvaq3Z-7l5qIyR-BuJnDIi_SjWJ2dWcWS31q7zCws74ta2IAa10-ohsOXV44ts5rekRSCpfjoDAAgJcpXnFo2VXljQ2lswxjM6CkdJI1nGq_cqmuGbBg/s512/logo300px.png';
 
 const manifestPath = path.join('android', 'app', 'src', 'main', 'AndroidManifest.xml');
 let manifest = fs.readFileSync(manifestPath, 'utf8');
@@ -19,7 +23,9 @@ if (!manifest.includes('android:usesCleartextTraffic')) {
   manifest = manifest.replace('<application', '<application\n        android:usesCleartextTraffic="true"');
 }
 if (!manifest.includes('android:banner')) {
-  manifest = manifest.replace('<application', '<application\n        android:banner="@mipmap/ic_launcher"');
+  manifest = manifest.replace('<application', '<application\n        android:banner="@drawable/tv_banner"');
+} else {
+  manifest = manifest.replace(/android:banner="[^"]*"/, 'android:banner="@drawable/tv_banner"');
 }
 if (!manifest.includes('LEANBACK_LAUNCHER')) {
   manifest = manifest.replace(
@@ -186,3 +192,94 @@ public class MainActivity extends BridgeActivity {
 
 fs.writeFileSync(mainActivityPath, mainActivityJava, 'utf8');
 console.log('MainActivity.java actualizado OK.');
+
+function downloadBuffer(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return resolve(downloadBuffer(res.headers.location));
+      }
+      if (res.statusCode !== 200) {
+        return reject(new Error('HTTP ' + res.statusCode + ' descargando logo'));
+      }
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    }).on('error', reject);
+  });
+}
+
+async function generateIconsAndBanner() {
+  console.log('Descargando logo oficial de KikeFlix...');
+  const logoBuf = await downloadBuffer(LOGO_URL);
+
+  try {
+    require.resolve('sharp');
+  } catch (e) {
+    console.log('Instalando sharp temporalmente para generar iconos y banner TV...');
+    execSync('npm install --no-save sharp', { stdio: 'inherit' });
+  }
+  const sharp = require('sharp');
+
+  const resDir = path.join('android', 'app', 'src', 'main', 'res');
+  const anydpiDir = path.join(resDir, 'mipmap-anydpi-v26');
+  if (fs.existsSync(anydpiDir)) {
+    fs.rmSync(anydpiDir, { recursive: true, force: true });
+    console.log('Eliminado mipmap-anydpi-v26 por defecto.');
+  }
+
+  const bg = { r: 5, g: 7, b: 14, alpha: 1 };
+  const mipmaps = [
+    { dir: 'mipmap-mdpi', size: 48 },
+    { dir: 'mipmap-hdpi', size: 72 },
+    { dir: 'mipmap-xhdpi', size: 96 },
+    { dir: 'mipmap-xxhdpi', size: 144 },
+    { dir: 'mipmap-xxxhdpi', size: 192 }
+  ];
+
+  for (const m of mipmaps) {
+    const outDir = path.join(resDir, m.dir);
+    fs.mkdirSync(outDir, { recursive: true });
+    const inner = Math.round(m.size * 0.78);
+    const resizedLogo = await sharp(logoBuf)
+      .resize(inner, inner, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+      .png()
+      .toBuffer();
+
+    const iconBuf = await sharp({
+      create: { width: m.size, height: m.size, channels: 4, background: bg }
+    })
+      .composite([{ input: resizedLogo, gravity: 'center' }])
+      .png()
+      .toBuffer();
+
+    fs.writeFileSync(path.join(outDir, 'ic_launcher.png'), iconBuf);
+    fs.writeFileSync(path.join(outDir, 'ic_launcher_round.png'), iconBuf);
+    fs.writeFileSync(path.join(outDir, 'ic_launcher_foreground.png'), resizedLogo);
+  }
+  console.log('Iconos mipmap generados con el logo de KikeFlix.');
+
+  const bannerLogo = await sharp(logoBuf)
+    .resize(220, 130, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png()
+    .toBuffer();
+
+  const bannerBuf = await sharp({
+    create: { width: 320, height: 180, channels: 4, background: bg }
+  })
+    .composite([{ input: bannerLogo, gravity: 'center' }])
+    .png()
+    .toBuffer();
+
+  for (const d of ['drawable', 'drawable-xhdpi']) {
+    const dDir = path.join(resDir, d);
+    fs.mkdirSync(dDir, { recursive: true });
+    fs.writeFileSync(path.join(dDir, 'tv_banner.png'), bannerBuf);
+  }
+  console.log('Banner TV (320x180) generado en drawable/tv_banner.png.');
+}
+
+generateIconsAndBanner().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
