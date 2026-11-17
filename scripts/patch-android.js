@@ -22,6 +22,12 @@ if (extras.length) {
 if (!manifest.includes('android:usesCleartextTraffic')) {
   manifest = manifest.replace('<application', '<application\n        android:usesCleartextTraffic="true"');
 }
+if (!manifest.includes('android:hardwareAccelerated')) {
+  manifest = manifest.replace('<application', '<application\n        android:hardwareAccelerated="true"');
+}
+if (!manifest.includes('android:largeHeap')) {
+  manifest = manifest.replace('<application', '<application\n        android:largeHeap="true"');
+}
 if (!manifest.includes('android:banner')) {
   manifest = manifest.replace('<application', '<application\n        android:banner="@drawable/tv_banner"');
 } else {
@@ -44,8 +50,10 @@ const mainActivityJava = `package com.kikeflix.tv;
 
 import android.content.Context;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
@@ -57,18 +65,30 @@ import com.getcapacitor.BridgeActivity;
 public class MainActivity extends BridgeActivity {
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
+    private boolean appInForeground = false;
+    private boolean audioPlaybackActive = false;
     private long lastBackPressMs = 0L;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        getWindow().addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        );
 
         WebView webView = getBridge() != null ? getBridge().getWebView() : null;
         if (webView != null) {
+            webView.setKeepScreenOn(true);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+            }
+
             WebSettings settings = webView.getSettings();
             settings.setJavaScriptEnabled(true);
             settings.setDomStorageEnabled(true);
             settings.setDatabaseEnabled(true);
+            settings.setCacheMode(WebSettings.LOAD_DEFAULT);
             settings.setMediaPlaybackRequiresUserGesture(false);
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
             settings.setUseWideViewPort(true);
@@ -130,61 +150,99 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
-    @SuppressWarnings("deprecation")
-    private void acquireLocks() {
-        try {
-            if (wakeLock == null) {
-                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-                if (pm != null) {
-                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KikeFlix:AudioWakeLock");
-                    wakeLock.setReferenceCounted(false);
-                }
-            }
-            if (wakeLock != null && !wakeLock.isHeld()) {
-                wakeLock.acquire();
-            }
-            if (wifiLock == null) {
-                WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
-                if (wm != null) {
-                    wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "KikeFlix:AudioWifiLock");
-                    wifiLock.setReferenceCounted(false);
-                }
-            }
-            if (wifiLock != null && !wifiLock.isHeld()) {
-                wifiLock.acquire();
-            }
-        } catch (Exception ignored) {}
+    @Override
+    public void onResume() {
+        super.onResume();
+        appInForeground = true;
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        syncLocks();
     }
 
-    private void releaseLocks() {
+    @Override
+    public void onPause() {
+        appInForeground = false;
+        syncLocks();
+        super.onPause();
+    }
+
+    @SuppressWarnings("deprecation")
+    private void syncLocks() {
+        boolean needWifi = appInForeground || audioPlaybackActive;
+        boolean needPartialWake = audioPlaybackActive;
+
         try {
-            if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+            if (needWifi) {
+                if (wifiLock == null) {
+                    WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                    if (wm != null) {
+                        int wifiMode = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                            ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                            : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                        wifiLock = wm.createWifiLock(wifiMode, "KikeFlix:StreamingWifiLock");
+                        wifiLock.setReferenceCounted(false);
+                    }
+                }
+                if (wifiLock != null && !wifiLock.isHeld()) {
+                    wifiLock.acquire();
+                }
+            } else {
+                if (wifiLock != null && wifiLock.isHeld()) {
+                    wifiLock.release();
+                }
+            }
         } catch (Exception ignored) {}
+
         try {
-            if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+            if (needPartialWake) {
+                if (wakeLock == null) {
+                    PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                    if (pm != null) {
+                        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "KikeFlix:AudioWakeLock");
+                        wakeLock.setReferenceCounted(false);
+                    }
+                }
+                if (wakeLock != null && !wakeLock.isHeld()) {
+                    wakeLock.acquire();
+                }
+            } else {
+                if (wakeLock != null && wakeLock.isHeld()) {
+                    wakeLock.release();
+                }
+            }
         } catch (Exception ignored) {}
     }
 
     @Override
     public void onDestroy() {
-        releaseLocks();
+        appInForeground = false;
+        audioPlaybackActive = false;
+        syncLocks();
         super.onDestroy();
     }
 
     public class AndroidAudioBridge {
         @JavascriptInterface
         public void iniciar(String titulo, String artista, String artwork) {
-            runOnUiThread(() -> acquireLocks());
+            runOnUiThread(() -> {
+                audioPlaybackActive = true;
+                syncLocks();
+            });
         }
 
         @JavascriptInterface
         public void pausar() {
-            runOnUiThread(() -> releaseLocks());
+            runOnUiThread(() -> {
+                audioPlaybackActive = false;
+                syncLocks();
+            });
         }
 
         @JavascriptInterface
         public void detener() {
-            runOnUiThread(() -> releaseLocks());
+            runOnUiThread(() -> {
+                audioPlaybackActive = false;
+                syncLocks();
+            });
         }
     }
 }
